@@ -23,18 +23,20 @@
 #include <WiFi.h>
 #include <esp_wifi.h>   
 #include <M5Unified.h>  // Includes M5GFX automatically
+#include <M5PM1.h>
 #include <ArduinoJson.h>
 
-#define TRMNL_API_KEY "11fyz3tBk1LVOqJgUb0I3g"
-#define M5PAPER_WAKE_BUTTON 39
+#define TRMNL_API_KEY "Sigrun2"
+#define M5PAPER_WAKE_BUTTON GPIO_NUM_4
 #define M5EPD_MAIN_PWR_PIN 2
 
-const char* WIFI_SSID = "DOK-C";
-const char* WIFI_PASS = "MolGF6131";
+const char* WIFI_SSID = "okb-1";
+const char* WIFI_PASS = "pwd";
 
+M5PM1 pm1;
 M5Canvas canvas(&M5.Display);
 HTTPClient http;
-RTC_DATA_ATTR int lastRefreshRate = 900;  // persists across deep sleep
+RTC_DATA_ATTR int lastRefreshRate = 60;  // persists across deep sleep
 
 void setup() {
   Serial.begin(115200);
@@ -42,14 +44,23 @@ void setup() {
   auto cfg = M5.config();
   cfg.output_power = true;
   cfg.internal_rtc = true;
+  cfg.clear_display = false;
   M5.begin(cfg);
 
+  M5.Power.M5pm1.setLedEnLevel(false);
   M5.Display.setRotation(1);  // landscape mode (960x540)
   M5.Display.setEpdMode(epd_mode_t::epd_quality);
-
   setCpuFrequencyMhz(80);
   btStop();
 
+//  canvas.setColorDepth(4); // mono color
+
+  canvas.createSprite(10, 10);
+  canvas.setTextSize(5);
+  canvas.setTextColor(1);
+  canvas.setBaseColor(200);
+  canvas.print("Updating...");
+  canvas.pushSprite(0, 0);
   canvas.createSprite(960, 540);
 
   pinMode(M5PAPER_WAKE_BUTTON, INPUT_PULLUP);
@@ -119,7 +130,7 @@ float getBatteryVoltage() {
 void fetchAndDisplay(float batteryVoltage) {
   Serial.println("Requesting display JSON from TRMNL...");
 
-  http.begin("https://trmnl.app/api/display");
+  http.begin("http://homeauto:4567/api/display");
   http.setTimeout(30000);
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
@@ -145,6 +156,8 @@ void fetchAndDisplay(float batteryVoltage) {
   String payload = http.getString();
   http.end();
 
+  Serial.println(payload);
+
   JsonDocument doc;
   auto err = deserializeJson(doc, payload);
   if (err) {
@@ -164,7 +177,7 @@ void fetchAndDisplay(float batteryVoltage) {
     goToDeepSleep(300);
   }
 
-  int refreshSec = doc["refresh_rate"] | 900;
+  int refreshSec = doc["refresh_rate"] | 60;
   lastRefreshRate = refreshSec;  // stored in RTC memory for next wake
 
   Serial.printf("Image URL: %s\nRefresh in: %d s\n", imageUrl, refreshSec);
@@ -221,10 +234,10 @@ bool downloadAndDisplayImage(const char* url) {
   if (len <= 0) {
     Serial.println("Content-Length is 0 or unknown, trying to read anyway...");
     // S3 should always provide Content-Length, but let's handle it
-    len = 200000; // Max size
+    len = 400000; // Max size
   }
   
-  if (len > 200000) {
+  if (len > 400000) {
     Serial.printf("Content too large: %d\n", len);
     http.end();
     return false;
@@ -316,17 +329,19 @@ void goToDeepSleep(int seconds) {
   M5.Display.waitDisplay();
 
   // CRITICAL: hold power pin during deep sleep for M5Paper
-  gpio_hold_en(GPIO_NUM_2);
+  gpio_hold_en(GPIO_NUM_4);
   gpio_deep_sleep_hold_en();
 
   esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
   esp_sleep_enable_ext0_wakeup((gpio_num_t)M5PAPER_WAKE_BUTTON, 0);  // wake on LOW
 
+  Serial.println("sleepy...");
   Serial.flush();  // Make sure all serial output is sent before sleeping
   delay(100);      // Give time for serial to flush
 
   // Use ESP32 deep sleep directly instead of M5.Power.deepSleep()
   esp_deep_sleep_start();
+//  M5.Power.deepSleep();
 }
 
 void loop() {
