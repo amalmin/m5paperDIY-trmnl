@@ -1,22 +1,23 @@
 /**
- * M5Paper TRMNL Firmware
+ * M5PaperDIY TRMNL Firmware
  * 
  * Fetches and displays images from TRMNL API on M5Paper e-ink display.
  * Optimized for low power consumption with deep sleep between refreshes.
  * 
- * @author Miggets7
+ * @author Miggets7 - Heavily modified by Kiera Malmin for m5PaperDIY
  * @version 1.0.0
  * @see https://docs.trmnl.com/go/diy/byod
  * 
- * Hardware: M5Paper (ESP32-based e-ink display)
+ * Hardware: M5PaperDIY (ESP32-based e-ink display)
  * Display: 960x540 4.7" grayscale e-paper
  * 
  * Key features:
  * - M5Unified library (modern, M5EPD deprecated)
  * - RTC memory for refresh rate persistence
- * - GPIO hold for power stability during deep sleep
+ * - PM chip wakeup from powered-down state.
+ * - ~32uA idle current.
  * - Automatic WiFi reconnection
- * - Battery voltage reporting to API
+ * - Battery voltage and Wifi RSSI reporting to API
  */
 
 #include <HTTPClient.h> // Must be FIRST
@@ -26,17 +27,19 @@
 #include <M5PM1.h>
 #include <ArduinoJson.h>
 
-#define TRMNL_API_KEY "Sigrun2"
+//#define TRMNL_API_KEY "Sigrun2" - I just use the mac addr - this is just annoying.
 #define M5PAPER_WAKE_BUTTON GPIO_NUM_4
 #define M5EPD_MAIN_PWR_PIN 2
+#define MAX_IMAGE_BYTES 400000
+#define SERVER_URL "http://homeauto:4567/api/display"
 
-const char* WIFI_SSID = "okb-1";
-const char* WIFI_PASS = "pwd";
+const char* WIFI_SSID = "ssid";
+const char* WIFI_PASS = "password";
 
 M5PM1 pm1;
 M5Canvas canvas(&M5.Display);
 HTTPClient http;
-RTC_DATA_ATTR int lastRefreshRate = 60;  // persists across deep sleep
+RTC_DATA_ATTR int lastRefreshRate = 60;  // persists across deep sleep - maybe?
 
 void setup() {
   Serial.begin(115200);
@@ -47,30 +50,33 @@ void setup() {
   cfg.clear_display = false;
   M5.begin(cfg);
 
-  M5.Power.M5pm1.setLedEnLevel(false);
-  M5.Display.setRotation(1);  // landscape mode (960x540)
-  M5.Display.setEpdMode(epd_mode_t::epd_quality);
   setCpuFrequencyMhz(80);
   btStop();
+  M5.Power.M5pm1.setLedEnLevel(false); // turn off the LED.
 
-//  canvas.setColorDepth(4); // mono color
+  const m5pm1_err_t err = pm1.begin(&M5.In_I2C, M5PM1_DEFAULT_ADDR, M5PM1_I2C_FREQ_100K);
+  bool pm1Ready = (err == M5PM1_OK);
+
+  if (!pm1Ready) {
+      Serial.printf("M5PM1 init failed: %d\n", err);
+  }
+
+  M5.Display.setRotation(1);  // landscape mode (960x540)
+  M5.Display.setEpdMode(epd_mode_t::epd_quality);
 
   canvas.createSprite(10, 10);
   canvas.setTextSize(5);
   canvas.setTextColor(1);
   canvas.setBaseColor(200);
-  canvas.print("Updating...");
+  canvas.print("Updating..."); // this doens't work right.  But it does craw a little square in the corner to let you know an update is pending.
   canvas.pushSprite(0, 0);
   canvas.createSprite(960, 540);
 
-  pinMode(M5PAPER_WAKE_BUTTON, INPUT_PULLUP);
-
   connectWiFi();
 
-  float batteryVoltage = getBatteryVoltage();
-  Serial.printf("Battery voltage: %.2f V\n", batteryVoltage);
+  Serial.printf("Yawn... (%d)\n", esp_sleep_get_wakeup_causes());
 
-  fetchAndDisplay(batteryVoltage);
+  fetchAndDisplay();
 }
 
 void connectWiFi() {
@@ -127,28 +133,29 @@ float getBatteryVoltage() {
   return voltage;
 }
 
-void fetchAndDisplay(float batteryVoltage) {
-  Serial.println("Requesting display JSON from TRMNL...");
+void fetchAndDisplay() {
+  Serial.println("Requesting display JSON...");
 
-  http.begin("http://homeauto:4567/api/display");
+  http.begin(SERVER_URL);
   http.setTimeout(30000);
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
-  http.addHeader("Access-Token", TRMNL_API_KEY);
+//  http.addHeader("Access-Token", TRMNL_API_KEY);
+  http.addHeader("Access-Token", WiFi.macAddress());
   http.addHeader("ID", WiFi.macAddress());
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("Battery-Voltage", String(batteryVoltage, 2));
-  http.addHeader("User-Agent", "M5Paper-TRMNL/1.0");
+  http.addHeader("Battery-Voltage", String(getBatteryVoltage(), 2));
+  http.addHeader("User-Agent", "M5PaperDIY-TRMNL/1.0");
   http.addHeader("FW-Version", "1.0.0");
   http.addHeader("RSSI", String(WiFi.RSSI()));
-  http.addHeader("Model", "m5paper");
+  http.addHeader("Model", "m5paperdiy");
   http.addHeader("Width", "960");
   http.addHeader("Height", "540");
   http.addHeader("Refresh-Rate", String(lastRefreshRate));
 
   int code = http.GET();
   if (code < 200 || code >= 300) {
-    Serial.printf("TRMNL GET failed, code %d\n", code);
+    Serial.printf("GET failed, code %d\n", code);
     http.end();
     goToDeepSleep(300);  // retry in 5 min
   }
@@ -189,23 +196,7 @@ void fetchAndDisplay(float batteryVoltage) {
 void displayImage(const char* imageUrl) {
   Serial.println("Loading image...");
 
-  bool success = false;
-
-  // // try PNG first (most common from TRMNL)
-  // Serial.println("Trying to load as PNG...");
-  // success = canvas.drawPngUrl(imageUrl, 0, 0);
-
-  // if (!success) {
-  //   Serial.println("PNG load failed, trying BMP...");
-  //   success = canvas.drawBmpUrl(imageUrl);
-  // }
-
-  if (!success) {
-    Serial.println("Manual image download...");
-    success = downloadAndDisplayImage(imageUrl);
-  }
-
-  if (!success) {
+  if (!downloadAndDisplayImage(imageUrl)) {
     Serial.println("Image display failed!");
   } else {
     canvas.pushSprite(0, 0);
@@ -234,10 +225,10 @@ bool downloadAndDisplayImage(const char* url) {
   if (len <= 0) {
     Serial.println("Content-Length is 0 or unknown, trying to read anyway...");
     // S3 should always provide Content-Length, but let's handle it
-    len = 400000; // Max size
+    len = MAX_IMAGE_BYTES; // Max size
   }
   
-  if (len > 400000) {
+  if (len > MAX_IMAGE_BYTES) {
     Serial.printf("Content too large: %d\n", len);
     http.end();
     return false;
@@ -318,7 +309,7 @@ bool downloadAndDisplayImage(const char* url) {
 }
 
 void goToDeepSleep(int seconds) {
-  Serial.printf("Sleeping for %d seconds (or until button press)...\n", seconds);
+  Serial.printf("Sleeping for %d seconds (or until power button press)...\n", seconds);
 
   canvas.deleteSprite();
 
@@ -328,22 +319,16 @@ void goToDeepSleep(int seconds) {
   M5.Display.sleep();
   M5.Display.waitDisplay();
 
-  // CRITICAL: hold power pin during deep sleep for M5Paper
-  gpio_hold_en(GPIO_NUM_4);
-  gpio_deep_sleep_hold_en();
-
-  esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)M5PAPER_WAKE_BUTTON, 0);  // wake on LOW
-
-  Serial.println("sleepy...");
-  Serial.flush();  // Make sure all serial output is sent before sleeping
-  delay(100);      // Give time for serial to flush
-
-  // Use ESP32 deep sleep directly instead of M5.Power.deepSleep()
-  esp_deep_sleep_start();
-//  M5.Power.deepSleep();
+  if (pm1.timerSet(seconds, M5PM1_TIM_ACTION_POWERON) == M5PM1_OK) {
+      Serial.println("Power-on timer configured.  Shutting down.");
+      Serial.flush();  // Make sure all serial output is sent before sleeping
+      delay(100);      // Give time for serial to flush
+      pm1.shutdown();
+  } else {
+      Serial.println("Power-on timer configuration failed");
+  }
 }
 
 void loop() {
-  // never reached; ESP32 restarts on wake from deep sleep
+  // never reached; ESP32 is booted from scratch by the PM chip for each loop.
 }
