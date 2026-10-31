@@ -45,6 +45,7 @@ The device will:
 
 ## Credits
 Built for the [TRMNL BYOD program](https://docs.trmnl.com/go/diy/byod)
+
 But I use LaraPaper instead!!
 
 ## License
