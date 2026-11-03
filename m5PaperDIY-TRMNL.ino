@@ -28,23 +28,21 @@
 #include <ArduinoJson.h>
 
 //#define TRMNL_API_KEY "Sigrun2" - I just use the mac addr - this is just annoying.
-#define M5PAPER_WAKE_BUTTON GPIO_NUM_4
-#define M5EPD_MAIN_PWR_PIN 2
 #define MAX_IMAGE_BYTES 400000
 #define SERVER_URL "http://homeauto:4567/api/display"
 
-const char* WIFI_SSID = "ssid";
-const char* WIFI_PASS = "password";
+const char* WIFI_SSID = "SSID";
+const char* WIFI_PASS = "PASSWORD";
 
 M5PM1 pm1;
 M5Canvas canvas(&M5.Display);
+
 HTTPClient http;
-RTC_DATA_ATTR int lastRefreshRate = 60;  // persists across deep sleep - maybe?
+RTC_DATA_ATTR int lastRefreshRate = 60;  // persists across deep sleep - maybe?  how does this work?  does it?
 
 void setup() {
-  Serial.begin(115200);
-
   auto cfg = M5.config();
+  cfg.serial_baudrate = 115200;
   cfg.output_power = true;
   cfg.internal_rtc = true;
   cfg.clear_display = false;
@@ -54,6 +52,8 @@ void setup() {
   btStop();
   M5.Power.M5pm1.setLedEnLevel(false); // turn off the LED.
 
+  Serial.printf("Battery Voltage: %.3f V\n", M5.Power.getBatteryVoltage() / 1000.0);
+
   const m5pm1_err_t err = pm1.begin(&M5.In_I2C, M5PM1_DEFAULT_ADDR, M5PM1_I2C_FREQ_100K);
   bool pm1Ready = (err == M5PM1_OK);
 
@@ -62,78 +62,50 @@ void setup() {
   }
 
   M5.Display.setRotation(1);  // landscape mode (960x540)
-  M5.Display.setEpdMode(epd_mode_t::epd_quality);
 
-  canvas.createSprite(10, 10);
-  canvas.setTextSize(5);
-  canvas.setTextColor(1);
+  canvas.createSprite(10, 10); // tiny sprite to draw a little squre in the corner to signify our update cycle
   canvas.setBaseColor(200);
-  canvas.print("Updating..."); // this doens't work right.  But it does craw a little square in the corner to let you know an update is pending.
   canvas.pushSprite(0, 0);
-  canvas.createSprite(960, 540);
+  canvas.createSprite(960, 540); // This is the one for the actual full screen update
 
-  connectWiFi();
+  M5.Display.setEpdMode(epd_mode_t::epd_quality);  // and now we ask for high quality for the real update.
 
-  Serial.printf("Yawn... (%d)\n", esp_sleep_get_wakeup_causes());
+  connectWiFi();  // This will never return if the wifi doesn't work.
 
-  fetchAndDisplay();
+  fetchAndDisplayImage(fetchJSON());  // This will never return if the wifi doesn't work.
+
+  goToDeepSleep("Success!");
 }
 
 void connectWiFi() {
-  Serial.print("Connecting to WiFi...");
+  Serial.println("Connecting to WiFi...");
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  
-  unsigned long start = millis();
-  int retryCount = 0;
+  WiFi.begin();
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-    
-    // Check for connection failure after just 5 seconds
-    if (millis() - start > 5000) {
-      if (WiFi.status() == WL_CONNECT_FAILED || WiFi.status() == WL_DISCONNECTED) {
-        retryCount++;
-        Serial.printf("\nConnection failed (status: %d), retry #%d\n", WiFi.status(), retryCount);
-        
-        if (retryCount > 3) {
-          Serial.println("Failed after 3 retries; restarting...");
-          delay(2000);
-          ESP.restart();
-        }
-        
-        WiFi.disconnect();
-        delay(500);
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
-        start = millis();  // Reset timer
-      }
-    }
-    
-    // Absolute timeout after 30 seconds
-    if (millis() - start > 30000) {
-      Serial.println("\nAbsolute timeout; restarting...");
-      ESP.restart();
-    }
+  int result = WiFi.waitForConnectResult(10000);
+
+  if(result == WL_CONNECTED) {
+      Serial.printf("Connected!  RSSI: %d\n", WiFi.RSSI());
+      return;
+  } else {
+    Serial.printf("That didn't work.  %d\n", result);
+
+    Serial.println("Trying to reset the credentials...");
+
+    WiFi.disconnect();
+    WiFi.persistent(true);
+    WiFi.setAutoReconnect(true);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
   }
 
-  Serial.println("\nWiFi connected!");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("MAC Address: ");
-  Serial.println(WiFi.macAddress());
+  result = WiFi.waitForConnectResult(10000);
+
+  if(result != WL_CONNECTED)
+    goToDeepSleep("That still didn't work.  Retrying later.");
 }
 
-float getBatteryVoltage() {
-  int32_t level = M5.Power.getBatteryLevel();
-  float voltage = M5.Power.getBatteryVoltage() / 1000.0;  // convert mV to V
-
-  Serial.printf("Battery level: %d%%, voltage: %.2f V\n", level, voltage);
-  return voltage;
-}
-
-void fetchAndDisplay() {
+String fetchJSON() {
   Serial.println("Requesting display JSON...");
 
   http.begin(SERVER_URL);
@@ -144,20 +116,20 @@ void fetchAndDisplay() {
   http.addHeader("Access-Token", WiFi.macAddress());
   http.addHeader("ID", WiFi.macAddress());
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("Battery-Voltage", String(getBatteryVoltage(), 2));
+  http.addHeader("Battery-Voltage", String(M5.Power.getBatteryVoltage() / 1000.0, 2));
   http.addHeader("User-Agent", "M5PaperDIY-TRMNL/1.0");
-  http.addHeader("FW-Version", "1.0.0");
+  http.addHeader("FW-Version", "1.1.0");
   http.addHeader("RSSI", String(WiFi.RSSI()));
-  http.addHeader("Model", "m5paperdiy");
+  http.addHeader("Model", "M5PaperDIY");
   http.addHeader("Width", "960");
   http.addHeader("Height", "540");
   http.addHeader("Refresh-Rate", String(lastRefreshRate));
 
   int code = http.GET();
   if (code < 200 || code >= 300) {
-    Serial.printf("GET failed, code %d\n", code);
+    Serial.printf("GET failed, code %d.\n", code);
     http.end();
-    goToDeepSleep(300);  // retry in 5 min
+    goToDeepSleep("Try again later.");
   }
 
   String payload = http.getString();
@@ -168,117 +140,46 @@ void fetchAndDisplay() {
   JsonDocument doc;
   auto err = deserializeJson(doc, payload);
   if (err) {
-    Serial.println("JSON parse error; sleeping 5 min");
-    goToDeepSleep(300);
+    Serial.printf("JSON parse error: %d.\n", err);
+    goToDeepSleep("Try again later.");
   }
 
   int status = doc["status"] | -1;
   if (status != 0) {
-    Serial.printf("TRMNL API status error: %d\n", status);
-    goToDeepSleep(300);
+    Serial.printf("TRMNL API status error: %d.\n", status);
+    goToDeepSleep("Try again later.");
   }
 
-  const char* imageUrl = doc["image_url"];
-  if (!imageUrl || strlen(imageUrl) == 0) {
-    Serial.println("No image_url in response; sleeping 5 min");
-    goToDeepSleep(300);
-  }
+  lastRefreshRate = doc["refresh_rate"] | 60;  // stored in RTC memory for next wake
 
-  int refreshSec = doc["refresh_rate"] | 60;
-  lastRefreshRate = refreshSec;  // stored in RTC memory for next wake
-
-  Serial.printf("Image URL: %s\nRefresh in: %d s\n", imageUrl, refreshSec);
-
-  displayImage(imageUrl);
-  goToDeepSleep(refreshSec);
+  return(String(doc["image_url"]));
 }
 
-void displayImage(const char* imageUrl) {
-  Serial.println("Loading image...");
-
-  if (!downloadAndDisplayImage(imageUrl)) {
-    Serial.println("Image display failed!");
-  } else {
-    canvas.pushSprite(0, 0);
-    M5.Display.display();
-    Serial.println("Image displayed successfully.");
-  }
-}
-
-bool downloadAndDisplayImage(const char* url) {
+void fetchAndDisplayImage(String url) {
   HTTPClient http;
-  http.begin(url);
-  http.setTimeout(30000);
+  http.begin(url.c_str());
+  http.setTimeout(10000);
 
+  Serial.printf("Get Image %s\n", url.c_str());
   int code = http.GET();
   Serial.printf("HTTP Response Code: %d\n", code);
-  
-  if (code != HTTP_CODE_OK) {
-    Serial.printf("HTTP GET failed, code: %d\n", code);
-    http.end();
-    return false;
-  }
-
   int len = http.getSize();
-  Serial.printf("Content-Length from getSize(): %d\n", len);
+  Serial.printf("Content-Length: %d\n", len);
 
-  if (len <= 0) {
-    Serial.println("Content-Length is 0 or unknown, trying to read anyway...");
-    // S3 should always provide Content-Length, but let's handle it
-    len = MAX_IMAGE_BYTES; // Max size
-  }
-  
-  if (len > MAX_IMAGE_BYTES) {
-    Serial.printf("Content too large: %d\n", len);
-    http.end();
-    return false;
-  }
+  String payload = http.getString();
 
-  uint8_t* buffer = (uint8_t*)malloc(len);
-  if (!buffer) {
-    Serial.println("Failed to allocate memory for image");
-    http.end();
-    return false;
-  }
-
-  // Use getString() instead of direct stream reading - more reliable
-  WiFiClient* stream = http.getStreamPtr();
-  
-  size_t bytesRead = 0;
-  unsigned long startTime = millis();
-  
-  while (http.connected() && bytesRead < len) {
-    size_t available = stream->available();
-    
-    if (available) {
-      int c = stream->read();
-      if (c >= 0) {
-        buffer[bytesRead++] = (uint8_t)c;
-        
-        // Progress indicator every 10KB
-        if (bytesRead % 10240 == 0) {
-          Serial.printf("Downloaded: %d/%d bytes\n", bytesRead, len);
-        }
-      }
-    } else {
-      // Check for timeout
-      if (millis() - startTime > 30000) {
-        Serial.println("Timeout while reading stream");
-        break;
-      }
-      delay(1);
-    }
-  }
-  
   http.end();
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
 
-  Serial.printf("Final bytes read: %d (expected: %d)\n", bytesRead, len);
+  unsigned int bytesRead = payload.length();
+  Serial.printf("Final bytes read: %d\n", bytesRead);
   
   if (bytesRead < 100) {
-    Serial.println("Downloaded data too small to be valid image");
-    free(buffer);
-    return false;
+    goToDeepSleep("Downloaded data too small to be valid image.");
   }
+
+  const uint8_t* buffer = (uint8_t*)payload.c_str();
 
   // Print magic bytes
   Serial.print("Magic bytes: ");
@@ -287,42 +188,35 @@ bool downloadAndDisplayImage(const char* url) {
   }
   Serial.println();
 
-  bool success = false;
-
   // PNG: 0x89 0x50 0x4E 0x47
   if (bytesRead >= 4 && buffer[0] == 0x89 && buffer[1] == 0x50 &&
       buffer[2] == 0x4E && buffer[3] == 0x47) {
     Serial.println("Detected PNG format");
-    success = canvas.drawPng(buffer, bytesRead, 0, 0);
+    canvas.drawPng(buffer, bytesRead, 0, 0);
   }
   // BMP: 'BM'
   else if (bytesRead >= 2 && buffer[0] == 'B' && buffer[1] == 'M') {
     Serial.println("Detected BMP format");
-    success = canvas.drawBmp(buffer, bytesRead, 0, 0);
+    canvas.drawBmp(buffer, bytesRead, 0, 0);
   }
   else {
-    Serial.println("Unknown image format from magic bytes");
+    goToDeepSleep("Unknown image format from magic bytes.");
   }
 
-  free(buffer);
-  return success;
+  canvas.pushSprite(0, 0);
+  M5.Display.display();
 }
 
-void goToDeepSleep(int seconds) {
-  Serial.printf("Sleeping for %d seconds (or until power button press)...\n", seconds);
-
-  canvas.deleteSprite();
+void goToDeepSleep(const char *reason) {
+  Serial.printf("%s  Sleeping for %d seconds (or until power button press)...\n", reason, lastRefreshRate);
 
   WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
 
-  M5.Display.sleep();
-  M5.Display.waitDisplay();
-
-  if (pm1.timerSet(seconds, M5PM1_TIM_ACTION_POWERON) == M5PM1_OK) {
+  if (pm1.timerSet(lastRefreshRate, M5PM1_TIM_ACTION_POWERON) == M5PM1_OK) {
       Serial.println("Power-on timer configured.  Shutting down.");
       Serial.flush();  // Make sure all serial output is sent before sleeping
-      delay(100);      // Give time for serial to flush
+      M5.Display.sleep();
+      M5.Display.waitDisplay();
       pm1.shutdown();
   } else {
       Serial.println("Power-on timer configuration failed");
